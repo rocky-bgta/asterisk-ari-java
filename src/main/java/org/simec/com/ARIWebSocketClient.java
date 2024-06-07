@@ -2,25 +2,14 @@ package org.simec.com;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import okhttp3.*;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 
 import java.net.URI;
-import java.util.concurrent.TimeUnit;
 
 public class ARIWebSocketClient extends WebSocketClient {
-    private static final String SERVER_URL = "http://192.168.0.179:8088";
-    private static final String USER = "asterisk";
-    private static final String PASSWORD = "secret";
-    private static final String CONTEXT = "default";
-    private static final String STASIS_APP = "my-stasis-app";
     private static final ObjectMapper objectMapper = new ObjectMapper();
-    private static final OkHttpClient httpClient = new OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS) // Increased timeout
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .build();
+    private String bridgeId;
 
     public ARIWebSocketClient(URI serverUri) {
         super(serverUri);
@@ -40,7 +29,7 @@ public class ARIWebSocketClient extends WebSocketClient {
             String eventType = jsonData.get("type").asText();
             System.out.println("Event Type: " + eventType);
 
-            if ("StasisStart".equals(eventType)) {
+            if ("StasisStart".equals(eventType) && !"ChannelDialplan".equals(eventType)) {
                 String channelId = jsonData.get("channel").get("id").asText();
                 String callerNumber = jsonData.get("channel").get("caller").get("number").asText();
                 System.out.println("Incoming call from: " + callerNumber + " on channel ID: " + channelId);
@@ -48,25 +37,33 @@ public class ARIWebSocketClient extends WebSocketClient {
                 String targetExtension = jsonData.get("channel").get("dialplan").get("exten").asText();
                 System.out.println("Target extension: " + targetExtension);
 
-                String bridgeId = createBridge();
+                bridgeId = ARIUtility.createBridge(Constants.SERVER_URL, Constants.USER, Constants.PASSWORD);
                 System.out.println("Bridge created with ID: " + bridgeId);
 
                 String SIPInfo = "SIP/" + targetExtension;
 
-                String newChannelId = createChannel(SERVER_URL, SIPInfo, targetExtension, CONTEXT, 1, STASIS_APP, USER, PASSWORD);
+                String newChannelId = ARIUtility.createChannel(Constants.SERVER_URL, SIPInfo, targetExtension, Constants.CONTEXT, 1, Constants.STASIS_APP, Constants.USER, Constants.PASSWORD);
                 System.out.println("New channel created with ID: " + newChannelId);
 
-                addChannelToBridge(SERVER_URL, bridgeId, channelId, USER, PASSWORD);
+                ARIUtility.addChannelToBridge(Constants.SERVER_URL, bridgeId, channelId, Constants.USER, Constants.PASSWORD);
                 System.out.println("Active channel " + channelId + " added to bridge " + bridgeId);
 
-                addChannelToBridge(SERVER_URL, bridgeId, newChannelId, USER, PASSWORD);
+                ARIUtility.addChannelToBridge(Constants.SERVER_URL, bridgeId, newChannelId, Constants.USER, Constants.PASSWORD);
                 System.out.println("New channel " + newChannelId + " added to bridge " + bridgeId);
 
-                dialChannel(SERVER_URL, newChannelId, USER, PASSWORD);
+                ARIUtility.dialChannel(Constants.SERVER_URL, newChannelId, Constants.USER, Constants.PASSWORD);
                 System.out.println("Dialing new channel " + newChannelId);
             } else if ("StasisEnd".equals(eventType)) {
                 String channelId = jsonData.get("channel").get("id").asText();
                 System.out.println("Channel ID: " + channelId + " has left the Stasis application");
+
+
+                // Clear the bridge
+                if (bridgeId != null) {
+                    ARIUtility.deleteBridge(Constants.SERVER_URL, bridgeId, Constants.USER, Constants.PASSWORD);
+                    System.out.println("Bridge " + bridgeId + " deleted");
+                    bridgeId = null;
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -83,79 +80,10 @@ public class ARIWebSocketClient extends WebSocketClient {
         ex.printStackTrace();
     }
 
-    private String createBridge() throws Exception {
-        String url = SERVER_URL + "/ari/bridges";
-        String data = "{\"type\":\"mixing\"}";
-        return postRequest(url, data, USER, PASSWORD);
-    }
-
-    private String createChannel(String serverUrl, String endpoint, String extension, String context, int priority, String app, String user, String password) throws Exception {
-        String url = serverUrl + "/ari/channels/create";
-        String data = String.format("{\"endpoint\":\"%s\", \"extension\":\"%s\", \"context\":\"%s\", \"priority\":%d, \"app\":\"%s\"}",
-                endpoint, extension, context, priority, app);
-        return postRequest(url, data, user, password);
-    }
-
-    private void addChannelToBridge(String serverUrl, String bridgeId, String channelId, String user, String password) throws Exception {
-        String url = serverUrl + "/ari/bridges/" + bridgeId + "/addChannel";
-        String data = "channel=" + channelId;
-        postUrlEncodedRequest(url, data, user, password);
-    }
-
-    private void dialChannel(String serverUrl, String channelId, String user, String password) throws Exception {
-        String url = serverUrl + "/ari/channels/" + channelId + "/dial";
-        postRequest(url, "", user, password);
-    }
-
-    private String postRequest(String url, String data, String user, String password) throws Exception {
-        RequestBody body = RequestBody.create(data, MediaType.parse("application/json"));
-        String credential = Credentials.basic(user, password);
-
-        Request request = new Request.Builder()
-                .url(url)
-                .post(body)
-                .addHeader("Authorization", credential)
-                .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new Exception("Unexpected code " + response);
-            }
-
-            String responseBody = response.body().string();
-            JsonNode responseObject = objectMapper.readTree(responseBody);
-            return responseObject.get("id").asText();
-        } catch (Exception e) {
-            System.err.println("Failed to perform HTTP request: " + e.getMessage());
-            throw e;
-        }
-    }
-
-    private void postUrlEncodedRequest(String url, String data, String user, String password) throws Exception {
-        RequestBody body = RequestBody.create(data, MediaType.parse("application/x-www-form-urlencoded"));
-        String credential = Credentials.basic(user, password);
-
-        Request request = new Request.Builder()
-                .url(url)
-                .post(body)
-                .addHeader("Authorization", credential)
-                .build();
-
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new Exception("Unexpected code " + response);
-            }
-            System.out.println("Response: " + response.body().string());
-        } catch (Exception e) {
-            System.err.println("Failed to perform HTTP request: " + e.getMessage());
-            throw e;
-        }
-    }
-
     public static void main(String[] args) {
         try {
-            String ipAddress = "192.168.0.179:8088";
-            String uri = "ws://" + ipAddress + "/ari/events?api_key=asterisk:secret&app=my-stasis-app";
+            String ipAddress = Constants.SERVER_URL.replace("http://", "").replace(":8088", "");
+            String uri = "ws://" + ipAddress + ":8088/ari/events?api_key=" + Constants.USER + ":" + Constants.PASSWORD + "&app=" + Constants.STASIS_APP;
             ARIWebSocketClient client = new ARIWebSocketClient(new URI(uri));
             client.connectBlocking();
         } catch (Exception e) {
